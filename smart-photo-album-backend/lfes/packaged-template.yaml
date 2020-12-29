@@ -1,0 +1,70 @@
+Resources:
+  ImageBucket:
+    Type: AWS::S3::Bucket
+  IndexStore:
+    Properties:
+      AccessPolicies:
+        Statement:
+        - Action: es:*
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Resource:
+            Fn::Sub: arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/*
+        Version: '2012-10-17'
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: 'true'
+      EBSOptions:
+        EBSEnabled: true
+        Iops: 0
+        VolumeSize: 20
+        VolumeType: gp2
+      ElasticsearchClusterConfig:
+        DedicatedMasterEnabled: 'false'
+        InstanceCount: '2'
+        InstanceType: m4.large.elasticsearch
+        ZoneAwarenessEnabled: 'true'
+      ElasticsearchVersion: 6.0
+    Type: AWS::Elasticsearch::Domain
+  IndexerFunction:
+    Properties:
+      CodeUri: s3://khk-us-east-1/demos/serverless-app-repo/bff65677c73335039d0641979be01349
+      Description: Run Rekognition detect labels from S3 events and store results
+        in ElasticSearch.
+      Environment:
+        Variables:
+          ELASTICSEARCH_URL:
+            Fn::GetAtt:
+            - IndexStore
+            - DomainEndpoint
+      Events:
+        S3JpgEvent:
+          Properties:
+            Bucket:
+              Ref: ImageBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                - Name: suffix
+                  Value: jpg
+          Type: S3
+        S3PngEvent:
+          Properties:
+            Bucket:
+              Ref: ImageBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                - Name: suffix
+                  Value: png
+          Type: S3
+      Handler: lambda_function.lambda_handler
+      Policies:
+      - AmazonS3ReadOnlyAccess
+      - AmazonRekognitionFullAccess
+      Runtime: python3.6
+      Timeout: 30
+    Type: AWS::Serverless::Function
+Transform: AWS::Serverless-2016-10-31

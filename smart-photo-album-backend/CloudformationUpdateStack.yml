@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  ElasticSearch:
+    Type: AWS::Elasticsearch::Domain
+    Properties:
+      DomainName: assign5
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: 10
+        VolumeType: standard
+      ElasticsearchClusterConfig:
+        InstanceCount: 1
+        InstanceType: t2.small.elasticsearch
+      ElasticsearchVersion: '7.8'
+  LambdaIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: '*'
+              - Effect: Allow
+                Action: 'rekognition:*'
+                Resource: '*'
+              - Effect: Allow
+                Action: 'es:*'
+                Resource: '*'
+              - Effect: Allow
+                Action: 'lex:*'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+  LF2:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import math
+          import time
+          import logging
+          import boto3
+          import random
+          from botocore.vendored import requests
+          from aws_requests_auth.aws_auth import AWSRequestsAuth
+          from elasticsearch import Elasticsearch, RequestsHttpConnection
+          import random
+
+          host = 'search-assignment-3-embfkaeetlkbbmtru7xvvuca5i.us-west-2.es.amazonaws.com'
+          region = 'us-west-2'
+
+          def search_elasticsearch(term):
+              credentials = boto3.Session().get_credentials()
+
+              awsauth = AWSRequestsAuth(
+                  aws_access_key=credentials.access_key,
+                  aws_secret_access_key=credentials.secret_key,
+                  aws_token=credentials.token,
+                  aws_host=host,
+                  aws_region=region,
+                  aws_service='es'
+              )
+
+              es = Elasticsearch(
+                  hosts = [{'host': host, 'port': 443}],
+                  http_auth = awsauth,
+                  use_ssl = True,
+                  verify_certs = True,
+                  connection_class = RequestsHttpConnection
+              )
+
+              es_index = 'images'
+              try:
+                  resp = es.search(index=es_index, q=term)
+                  print(resp)
+
+                  return resp['hits']['hits'][0]['_id']
+              except:
+                  return None
+
+
+          def lambda_handler(event, context):
+              print(event)
+              text = event['queryStringParameters']['q']
+              print(text)
+              client = boto3.client('lex-runtime')
+              randomId = str(random.randint(0,2000))
+              response = client.post_text(
+                  botName='photoSearch',
+                  botAlias='photos_search',
+                  userId=randomId,
+                  inputText='Hi'
+              )
+              
+              response = client.post_text(
+                  botName='photoSearch',
+                  botAlias='photos_search',
+                  userId=randomId,
+                  inputText=text
+              )
+              
+              print('**response**')
+              print(response)
+              labels = []
+              responseText = response['slots']['Animal']
+
+              if responseText and 'and' in responseText:
+                  labels = responseText.split('and')
+              elif responseText:
+                  labels = responseText.split()
+              
+              labels = [i.strip() for i in labels]
+              print(labels)
+              output = []
+              
+              for label in labels:
+                  print(search_elasticsearch(label))
+                  result = search_elasticsearch(label)
+                  if result:
+                      output.append(result)
+              
+              print(output)
+              
+              bucket = 'serverlessrepo-s3-image-indexer-elast-imagebucket-daiemzlg6id4'
+              img_array = []
+              for i in output:
+                  if i:
+                      img_url= "https://" + bucket + ".s3.amazonaws.com/" + i
+                      img_array.append(img_url)
+                  
+              if output:
+                  print("first")
+                  response = {
+                      'statusCode': 200,
+                      'headers':{
+                          'Access-Control-Allow-Origin':'*',
+                          'Access-Control-Allow-Headers':'*',
+                          "Access-Control-Allow-Methods": "OPTIONS,GET"
+                      },
+                      'body': json.dumps({
+                          "results":img_array
+                      })
+                  }
+              else:
+                  print("second")
+                  response = {
+                      'statusCode': 200,
+                      'headers':{
+                          'Access-Control-Allow-Origin':'*',
+                          'Access-Control-Allow-Headers':'*',
+                          "Access-Control-Allow-Methods": "OPTIONS,GET"
+                          
+                      },
+                      'body':  json.dumps({ "results": []})
+                  }
+              #logger.debug('event.bot.name={}'.format(event['bot']['name']))
+              print(response)
+              return response
+
+
+      FunctionName: 'CFLF22'
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      MemorySize: 528
+      Timeout: 30
+      Role: !GetAtt LambdaIAMRole.Arn
+  IndexerFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'CFIndexer2'
+      Description: 'Run Rekognition detect labels from S3 events and store results in ElasticSearch.'
+      Handler: index.lambda_handler
+      Runtime: python3.6
+      Timeout: 30
+      Role: !GetAtt LambdaIAMRole.Arn
+      Environment:
+        Variables:
+          ELASTICSEARCH_URL: 
+            Fn::GetAtt:
+            - ElasticSearch
+            - DomainEndpoint
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import logging
+          from elasticsearch import Elasticsearch, RequestsHttpConnection
+          from aws_requests_auth.aws_auth import AWSRequestsAuth
+
+          logger = logging.getLogger()
+          es_host = os.getenv('ELASTICSEARCH_URL')
+          es_index = 'images'
+          access_key = os.getenv('AWS_ACCESS_KEY_ID')
+          secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+          session_token = os.getenv('AWS_SESSION_TOKEN')
+          region = os.getenv('AWS_REGION')
+
+          # Create clients for AWS services
+          rek_client = boto3.client('rekognition')
+
+          # Establish connection to ElasticSearch
+          auth = AWSRequestsAuth(aws_access_key=access_key,
+                                 aws_secret_access_key=secret_access_key,
+                                 aws_token=session_token,
+                                 aws_host=es_host,
+                                 aws_region=region,
+                                 aws_service='es')
+
+          es = Elasticsearch(host=es_host,
+                             port=443,
+                             use_ssl=True,
+                             connection_class=RequestsHttpConnection,
+                             http_auth=auth)
+
+          logger.info("{}".format(es.info()))
+
+
+          def lambda_handler(event, context):
+              """Lambda Function entrypoint handler
+
+              :event: S3 Put event
+              :context: Lambda context
+              :returns: Number of records processed
+
+              """
+              processed = 0
+              for record in event['Records']:
+                  s3_record = record['s3']
+
+                  key = s3_record['object']['key']
+                  bucket = s3_record['bucket']['name']
+                  
+                  resp = rek_client.detect_labels(
+                      Image={'S3Object': {'Bucket': bucket, 'Name': key}},
+                      MaxLabels=10,
+                      MinConfidence=80)
+                      
+                  labels = []
+                  for l in resp['Labels']:
+                      labels.append(l['Name'])
+                  
+                  logger.debug('Detected labels: {}'.format(labels))
+                  res = es.index(index=es_index, doc_type='event',
+                                 id=key, body={'labels': labels})
+
+                  logger.debug(res)
+                  processed = processed + 1
+
+              logger.info('Successfully processed {} records'.format(processed))
+              return processed
+  
+  LambdaInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt IndexerFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !GetAtt ImageBucket.Arn
+
+  ImageBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: assignment3-image-trigger2         
+      NotificationConfiguration:   #Update stack with NotificationConfiguration
+          LambdaConfigurations:
+              - Event: 's3:ObjectCreated:*'
+                Function: !GetAtt IndexerFunction.Arn
+                Filter:
+                  S3Key:
+                    Rules:
+                      -
+                        Name: suffix
+                        Value: jpg
+
