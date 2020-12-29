@@ -1,4 +1,4 @@
-# Smart-Photo-Album
+# Voice-Controlled-Smart-Photo-Album
 
 ## Architecture ##
 
